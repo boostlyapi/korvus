@@ -1,91 +1,86 @@
 # korvus
 
-Для поиска по смыслу и генерации ответов по документам нужны эмбеддинги, поиск подходящих фрагментов и передача контекста языковой модели. korvus объединяет эти операции в запросе к PostgreSQL, чтобы данные и обработка оставались рядом.
+Retrieval-augmented generation needs document preparation, embeddings, search, and context for text generation. korvus brings those steps into Postgres through a search SDK, with the RAG pipeline expressed as a single database query.
 
-Проект написан на Rust. Для работы с базой из других языков предусмотрены привязки Python, JavaScript и C.
+## Features
 
-## Возможности
+- Split document text and generate embeddings through a configured pipeline.
+- Insert or update documents in a collection with `upsert_documents`.
+- Retrieve relevant text with vector search and rerank results.
+- Combine retrieval and text generation in a database query.
+- Access the SDK from Rust, Python, JavaScript, or C.
 
-- Разбивает текст документов на фрагменты и вычисляет для них эмбеддинги выбранной моделью.
-- Находит фрагменты по векторной близости к поисковому запросу.
-- Повторно ранжирует найденные фрагменты перед передачей в контекст модели.
-- Объединяет поиск контекста и генерацию ответа в одном запросе к базе.
-- Выполняет обработку моделей через расширение pgml, а операции с векторами через pgvector.
+## Installation
 
-## Установка
+**A standard Postgres installation is not enough.** The database must have the PostgresML `pgml` extension and `pgvector` installed. See the upstream [database setup guide](https://postgresml.org/docs/open-source/pgml/developers/quick-start-with-docker) for setup instructions.
 
-Понадобятся Rust с Cargo и PostgreSQL с установленными расширениями `pgml` и `vector` из проекта pgvector. Обычной установки PostgreSQL недостаточно. Требования к вычислительным ресурсам зависят от выбранных моделей.
-
-Из корня исходного кода:
+From an existing Rust project, add the SDK dependency:
 
 ```bash
-cargo build --release
+cargo add korvus
 ```
 
-Укажите строку подключения:
+Set the database connection string:
 
 ```bash
-export KORVUS_DATABASE_URL='postgresql://korvus:password@localhost:5432/korvus'
+export KORVUS_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/postgresml"
 ```
 
-Не сохраняйте пароль в репозитории. Для рабочего окружения передавайте строку подключения через настройки среды или хранилище секретов.
+Replace the credentials, host, port, and database name with your database settings.
 
-## Использование
-
-korvus работает как SDK; отдельная команда вида `korvus search` здесь не предполагается. Ниже приведена проверка серверной части из Rust: программа принимает текст аргументом, вызывает модель через `pgml` и возвращает размерность полученного вектора. Это прямой SQL-пример, а не пример интерфейса Rust SDK и не полный цикл RAG.
-
-Создайте отдельную программу:
+The usage example below uses the Python binding. Install it separately:
 
 ```bash
-cargo new korvus-db-check
-cd korvus-db-check
-cargo add postgres
+pip install korvus
 ```
 
-Замените содержимое `src/main.rs`:
+## Usage
 
-```rust
-use postgres::{Client, NoTls};
-use std::{env, error::Error, io};
+korvus is an SDK. The following example runs a small ingestion script rather than assuming a `korvus` command-line executable exists.
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let text = env::args().nth(1).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Usage: korvus-db-check <text>",
-        )
-    })?;
-    let database_url = env::var("KORVUS_DATABASE_URL")?;
-    let mut client = Client::connect(&database_url, NoTls)?;
+Save this as `ingest.py`. It configures text splitting and semantic search, then inserts a document supplied as a command-line argument. Reusing the document ID updates that document.
 
-    let row = client.query_one(
-        "SELECT vector_dims(
-            pgml.embed(
-                'Alibaba-NLP/gte-base-en-v1.5',
-                $1::text
-            )::vector
-        )",
-        &[&text],
-    )?;
+```python
+import argparse
+import asyncio
+from korvus import Collection, Pipeline
 
-    let dimensions: i32 = row.get(0);
-    println!("Embedding dimensions: {dimensions}");
-    Ok(())
-}
+
+async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("text", help="Document text to insert")
+    parser.add_argument("--id", default="1", help="Document ID")
+    args = parser.parse_args()
+
+    collection = Collection("korvus-demo-v0")
+    pipeline = Pipeline(
+        "v1",
+        {
+            "text": {
+                "splitter": {"model": "recursive_character"},
+                "semantic_search": {"model": "Alibaba-NLP/gte-base-en-v1.5"},
+            }
+        },
+    )
+
+    await collection.add_pipeline(pipeline)
+    await collection.upsert_documents([
+        {"id": args.id, "text": args.text},
+    ])
+    print(f"Upserted document {args.id}")
+
+
+asyncio.run(main())
 ```
 
-Запустите проверку:
+Run it against the configured database:
 
 ```bash
-cargo run --release -- 'How does semantic search work?'
+python ingest.py --id 1 "Korvus puts the RAG pipeline inside Postgres."
 ```
 
-Пример использует англоязычную модель из исходной конфигурации проекта. Сервер должен иметь возможность загрузить и выполнить эту модель; первый вызов может занять больше времени. Подключение с `NoTls` подходит для локальной проверки. Для удалённой базы настройте TLS.
+This example prepares documents for semantic retrieval; it does not generate an answer. Refer to the [upstream SDK documentation](https://postgresml.org/docs/open-source/korvus/) for search and RAG calls and language-specific examples.
 
-Успешный результат подтверждает, что генерация эмбеддингов и работа с типом `vector` доступны из приложения. Для полного RAG-процесса дополнительно нужны документы, настроенный конвейер обработки и модель генерации текста.
+## License
 
-## Лицензия
-
-MIT. Проект основан на [postgresml/korvus](https://github.com/postgresml/korvus).
-
-При распространении исходного кода или существенных его частей сохраняйте исходное уведомление об авторских правах и текст лицензии MIT. Новое имя или самостоятельное развитие проекта не отменяют это требование.
+MIT. This project is based on [postgresml/korvus](https://github.com/postgresml/korvus), which is licensed under the MIT License. Retain the upstream copyright and permission notices in copies or substantial portions of the original software.
